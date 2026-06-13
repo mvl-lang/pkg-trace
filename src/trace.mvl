@@ -1,0 +1,140 @@
+// pkg.trace — distributed tracing with spans and trace context.
+//
+// Part of MVL's observability triangle: logs (std.log), metrics (pkg.metrics), trace (here).
+//
+// Core concepts:
+//   - Trace: end-to-end journey of a request (trace_id)
+//   - Span: single unit of work within a trace (span_id, parent_span_id)
+//   - Context: propagated metadata (trace_id, span_id, baggage)
+//
+// Import:
+//   use pkg.trace.{TraceContext, Span, SpanStatus,
+//                  trace_start, span_start, span_end, span_error, span_set,
+//                  traced, baggage_set, baggage_get,
+//                  parse_traceparent, format_traceparent}
+//
+// Effects: ! Trace (all span operations).
+//
+// See #807.
+
+use std.time.{Timestamp, now}
+use std.crypto.{uuid_v4}
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+/// 128-bit trace identifier (hex string).
+pub type TraceId = String
+
+/// 64-bit span identifier (hex string).
+pub type SpanId = String
+
+/// Propagated trace context.
+/// Carries trace/span IDs and optional baggage (key-value metadata).
+pub type TraceContext = struct {
+    trace_id: TraceId,
+    span_id: SpanId,
+    parent_span_id: Option[SpanId],
+    baggage: Map[String, String],
+}
+
+/// Span status: success or error.
+pub type SpanStatus = enum {
+    Ok,
+    Error { message: String },
+}
+
+/// A completed span with timing and attributes.
+pub type Span = struct {
+    name: String,
+    context: TraceContext,
+    start_time: Timestamp,
+    end_time: Option[Timestamp],
+    attributes: Map[String, String],
+    status: SpanStatus,
+}
+
+// ── Trace lifecycle ───────────────────────────────────────────────────────────
+
+/// Start a new trace (entry point).
+/// Creates a new trace_id and root span_id.
+pub builtin fn trace_start(name: String) -> TraceContext ! Trace
+
+/// Start a child span within an existing trace.
+/// Inherits trace_id and baggage; creates new span_id with parent link.
+pub builtin fn span_start(name: String, parent: TraceContext) -> TraceContext ! Trace
+
+/// End a span successfully.
+pub builtin fn span_end(ctx: TraceContext) -> Unit ! Trace
+
+/// End a span with an error.
+pub builtin fn span_error(ctx: TraceContext, message: String) -> Unit ! Trace
+
+// ── Span attributes ───────────────────────────────────────────────────────────
+
+/// Add an attribute to the current span.
+/// Common attributes: http.method, http.path, db.statement, user.id
+pub builtin fn span_set(ctx: TraceContext, key: String, value: String) -> Unit ! Trace
+
+// ── Convenience wrapper ───────────────────────────────────────────────────────
+
+/// Trace a function call: creates a child span, runs the function, ends the span.
+/// On error, records the error message before propagating.
+pub builtin fn traced[T, E](
+    name: String,
+    parent: TraceContext,
+    f: fn(TraceContext) -> T ! E
+) -> T ! E + Trace
+
+// ── Baggage ───────────────────────────────────────────────────────────────────
+
+/// Set a baggage item (propagated to all child spans and downstream services).
+/// Use sparingly — baggage travels with every request.
+pub fn baggage_set(ctx: TraceContext, key: String, value: String) -> TraceContext {
+    TraceContext {
+        trace_id: ctx.trace_id,
+        span_id: ctx.span_id,
+        parent_span_id: ctx.parent_span_id,
+        baggage: ctx.baggage.insert(key, value),
+    }
+}
+
+/// Get a baggage item.
+pub fn baggage_get(ctx: val TraceContext, key: String) -> Option[String] {
+    ctx.baggage.get(key)
+}
+
+// ── W3C Trace Context propagation ─────────────────────────────────────────────
+//
+// Header format: traceparent: 00-{trace_id}-{span_id}-{flags}
+// Example: traceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01
+
+/// Parse a W3C traceparent header.
+/// Returns None if the header is malformed.
+pub fn parse_traceparent(header: String) -> Option[TraceContext] {
+    let parts = header.split("-");
+    if parts.len() != 4 {
+        return None
+    }
+
+    let version = parts[0];
+    let trace_id = parts[1];
+    let span_id = parts[2];
+    // parts[3] is flags (ignored for now)
+
+    // Validate format: version=2 hex chars, trace_id=32 hex, span_id=16 hex
+    if version.len() != 2 || trace_id.len() != 32 || span_id.len() != 16 {
+        return None
+    }
+
+    Some(TraceContext {
+        trace_id: trace_id,
+        span_id: span_id,
+        parent_span_id: None,
+        baggage: {},
+    })
+}
+
+/// Format a TraceContext as a W3C traceparent header.
+/// Format: 00-{trace_id}-{span_id}-01
+pub fn format_traceparent(ctx: val TraceContext) -> String {
+    "00-".concat(ctx.trace_id).concat("-").concat(ctx.span_id).concat("-01")
