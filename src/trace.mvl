@@ -130,14 +130,14 @@ fn format_attrs_json(attrs: Map[String, String]) -> String {
     result
 }
 
-fn emit_logfmt(ctx: val TraceContext, start_ts: String, end_ts: String, status: String, error_msg: String) -> String {
+fn emit_logfmt(ctx: val TraceContext, wall_ts: String, start_ts: String, end_ts: String, status: String, error_msg: String) -> String {
     let parent: String   = opt_str(ctx.parent_span_id);
     let attrs: String    = format_attrs_logfmt(ctx.attributes);
     let err_part: String = if error_msg.len() > 0 { " error=".concat(error_msg) } else { "" };
-    let f1: String = "span span_id=".concat(ctx.span_id).concat(" trace_id=");
-    let f2: String = f1.concat(ctx.trace_id).concat(" parent=");
-    let f3: String = f2.concat(parent).concat(" name=");
-    let f4: String = f3.concat(ctx.name).concat(" start_time=");
+    let f1: String = wall_ts.concat(" SPAN  ").concat(ctx.name).concat(" span_id=");
+    let f2: String = f1.concat(ctx.span_id).concat(" trace_id=");
+    let f3: String = f2.concat(ctx.trace_id).concat(" parent=");
+    let f4: String = f3.concat(parent).concat(" start_time=");
     let f5: String = f4.concat(start_ts).concat(" end_time=");
     let f6: String = f5.concat(end_ts).concat(" status=");
     f6.concat(status).concat(err_part).concat(attrs)
@@ -157,6 +157,7 @@ fn emit_json(ctx: val TraceContext, start_ts: String, end_ts: String, status: St
 }
 
 fn emit_span(tracer: val Tracer, ctx: val TraceContext, end_time: Instant, status: String, error_msg: String) -> Unit ! Console {
+    let wall_ts: String  = format_instant(end_time, "%Y-%m-%d %H:%M:%S");
     let end_ts: String   = format_instant(end_time, "%Y-%m-%dT%H:%M:%SZ");
     let start_ts: String = match ctx.start_time {
         None    => format_instant(end_time, "%Y-%m-%dT%H:%M:%SZ"),
@@ -165,7 +166,7 @@ fn emit_span(tracer: val Tracer, ctx: val TraceContext, end_time: Instant, statu
     let line: String = if format_is_json(tracer.format) {
         emit_json(ctx, start_ts, end_ts, status, error_msg)
     } else {
-        emit_logfmt(ctx, start_ts, end_ts, status, error_msg)
+        emit_logfmt(ctx, wall_ts, start_ts, end_ts, status, error_msg)
     };
     let _: Result[Unit, IoError] = write(tracer.fd, line.concat("\n"));
 }
