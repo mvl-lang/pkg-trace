@@ -130,7 +130,7 @@ pub fn parse_traceparent(header: String) -> Option[TraceContext] {
         trace_id: trace_id,
         span_id: span_id,
         parent_span_id: None,
-        baggage: {},
+        baggage: Map::new(),
     })
 }
 
@@ -138,3 +138,4 @@ pub fn parse_traceparent(header: String) -> Option[TraceContext] {
 /// Format: 00-{trace_id}-{span_id}-01
 pub fn format_traceparent(ctx: val TraceContext) -> String {
     "00-".concat(ctx.trace_id).concat("-").concat(ctx.span_id).concat("-01")
+}
