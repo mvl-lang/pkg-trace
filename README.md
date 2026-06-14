@@ -63,7 +63,7 @@ fn get_user(parent: TraceContext, id: Int) -> Result[User, Error] ! DB + Trace {
 
 ## Related
 
-- [#807](https://github.com/LAB271/mvl_language/issues/807) — Original design ticket
+-  — Original design ticket
 - [pkg-metrics](https://github.com/mvl-lang/pkg-metrics) — Metrics
 - [pkg-health](https://github.com/mvl-lang/pkg-health) — Health checks
 - [W3C Trace Context](https://www.w3.org/TR/trace-context/)
