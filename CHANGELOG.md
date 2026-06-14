@@ -4,6 +4,11 @@ All notable changes to pkg-trace will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.1] - 2026-06-14
+
+### Fixed
+- Declare `pub effect Trace > Clock + CryptoRandom` in `src/trace.mvl` — the effect was used in all `builtin fn` signatures but never declared, causing a compiler error on import
+
 ## [0.2.0] - 2026-06-14
 
 ### Fixed
