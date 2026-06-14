@@ -159,7 +159,7 @@ fn emit_json(ctx: val TraceContext, start_ts: String, end_ts: String, status: St
 fn emit_span(tracer: val Tracer, ctx: val TraceContext, end_time: Instant, status: String, error_msg: String) -> Unit ! Console {
     let end_ts: String   = format_instant(end_time, "%Y-%m-%dT%H:%M:%SZ");
     let start_ts: String = match ctx.start_time {
-        None    => end_ts,
+        None    => format_instant(end_time, "%Y-%m-%dT%H:%M:%SZ"),
         Some(t) => format_instant(t, "%Y-%m-%dT%H:%M:%SZ"),
     };
     let line: String = if format_is_json(tracer.format) {
