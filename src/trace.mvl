@@ -20,6 +20,10 @@
 use std.time.{Timestamp, now}
 use std.crypto.{uuid_v4}
 
+// ── Effect declaration ────────────────────────────────────────────────────────
+
+pub effect Trace > Clock + CryptoRandom
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /// 128-bit trace identifier (hex string).
