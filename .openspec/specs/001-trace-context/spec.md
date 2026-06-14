@@ -19,15 +19,20 @@ downstream services in a single trace view.
 │  MVL Application                         │
 │  (handle_request, db calls, actors)      │
 ├──────────────────────────────────────────┤
-│  pkg.trace                               │
+│  pkg.trace — Pure MVL                    │
+│  Tracer (format, fd)                     │
 │  trace_start / span_start / span_end     │
-│  span_set / traced / baggage_set         │
+│  span_set / baggage_set / baggage_get    │
 │  parse_traceparent / format_traceparent  │
 ├──────────────────────────────────────────┤
-│  std.time  (Timestamp, now)              │
+│  std.time  (Instant, now)                │
 │  std.crypto (uuid_v4)                    │
+│  std.io (Fd, stderr, write)              │
 ├──────────────────────────────────────────┤
-│  Exporter (OTLP / Jaeger / Zipkin) — #2  │
+│  Span Emission: logfmt/JSON to Fd        │
+│  (stderr by default, file/pipe on demand)│
+├──────────────────────────────────────────┤
+│  Exporter (OTLP / Jaeger) — spec 002     │
 └──────────────────────────────────────────┘
 ```
 
@@ -38,13 +43,17 @@ downstream services in a single trace view.
 A trace starts with `trace_start` and ends when all spans in the trace have been ended.
 Each span records a name, timing, attributes, and status.
 
-**Implementation:** `src/trace.mvl::trace_start`, `span_start`, `span_end`, `span_error`
+Spans are emitted to a configurable destination (Fd) with a configurable format (logfmt or JSON)
+via a `Tracer` struct. The default tracer writes to stderr in logfmt format.
+
+**Implementation:** `src/trace.mvl::trace_start`, `span_start`, `span_end`, `span_error`, `default_tracer`, `file_tracer`
 
 #### Scenario: Root span lifecycle
 
-- GIVEN an HTTP handler
+- GIVEN an HTTP handler and a Tracer
 - WHEN `trace_start("http.request")` is called on entry
 - THEN a `TraceContext` is returned with a fresh `trace_id` and `span_id`
+- AND `span_end(tracer, ctx)` writes the completed span to the tracer's Fd
 
 #### Scenario: Child span lifecycle
 
@@ -62,13 +71,16 @@ Attributes MUST NOT contain PII — see #3 for the planned `Public[String]` guar
 Common attribute keys follow OpenTelemetry semantic conventions:
 `http.method`, `http.path`, `db.statement`, `user.id`, `error.message`.
 
+`span_set` is a pure function: it returns a new TraceContext with the attribute added
+(the original context is unchanged). Use functional composition to build up attributes.
+
 **Implementation:** `src/trace.mvl::span_set`
 
 #### Scenario: HTTP span attributes
 
-- GIVEN an HTTP request span
-- WHEN `span_set(ctx, "http.method", "GET")` and `span_set(ctx, "http.path", "/users")` are called
-- THEN the completed span records both attributes
+- GIVEN an HTTP request span `ctx`
+- WHEN `let ctx2 = span_set(ctx, "http.method", "GET")` and `let ctx3 = span_set(ctx2, "http.path", "/users")` are called
+- THEN `span_end(tracer, ctx3)` emits a span with both attributes
 
 ---
 

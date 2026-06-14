@@ -1,104 +1,256 @@
 // pkg.trace — distributed tracing with spans and trace context.
 //
-// Part of MVL's observability triangle: logs (std.log), metrics (pkg.metrics), trace (here).
+// Pure MVL implementation: spans are emitted as structured lines to an Fd
+// (stderr by default). No native code required — both Rust and LLVM backends.
 //
 // Core concepts:
-//   - Trace: end-to-end journey of a request (trace_id)
-//   - Span: single unit of work within a trace (span_id, parent_span_id)
-//   - Context: propagated metadata (trace_id, span_id, baggage)
+//   - Trace:   end-to-end journey of a request (trace_id)
+//   - Span:    single unit of work within a trace (span_id, parent_span_id)
+//   - Context: live span threaded through the call graph
+//   - Tracer:  output configuration (format + destination fd)
 //
 // Import:
-//   use pkg.trace.{TraceContext, Span, SpanStatus,
+//   use pkg.trace.{Tracer, SpanFormat, TraceContext, SpanStatus,
+//                  default_tracer, file_tracer,
 //                  trace_start, span_start, span_end, span_error, span_set,
 //                  traced, baggage_set, baggage_get,
 //                  parse_traceparent, format_traceparent}
 //
-// Effects: ! Trace (all span operations).
+// Effects: ! Trace  (subsumes Clock + CryptoRandom + Console)
 //
 // See .openspec/specs/001-trace-context/spec.md.
 
-use std.time.{Timestamp, now}
+use std.time.{Instant, now, format_instant}
 use std.crypto.{uuid_v4}
+use std.io.{Fd, stderr, write, IoError}
 
 // ── Effect declaration ────────────────────────────────────────────────────────
 
-pub effect Trace > Clock + CryptoRandom
+pub effect Trace > Clock + CryptoRandom + Console
+
+// ── Output configuration ──────────────────────────────────────────────────────
+
+/// Output format for span lines emitted by span_end / span_error.
+pub type SpanFormat = enum {
+    Logfmt,  // span span_id=xxx trace_id=xxx name=http.request status=ok
+    Json,    // {"span_id":"xxx","trace_id":"xxx",...}
+}
+
+/// Output configuration for span emission — where and how to write completed spans.
+///
+/// Plain old data — val-shareable. Construct with `default_tracer()` or `file_tracer()`.
+pub type Tracer = struct {
+    format: SpanFormat,
+    fd:     Fd,
+}
+
+/// Construct a Tracer writing to stderr in Logfmt format.
+pub fn default_tracer() -> Tracer {
+    Tracer { format: SpanFormat::Logfmt, fd: stderr() }
+}
+
+/// Construct a Tracer writing to a custom Fd (file, pipe, or any open descriptor).
+pub fn file_tracer(fd: Fd, format: SpanFormat) -> Tracer {
+    Tracer { format: format, fd: fd }
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-/// 128-bit trace identifier (hex string).
-pub type TraceId = String
-
-/// 64-bit span identifier (hex string).
-pub type SpanId = String
-
-/// Propagated trace context.
-/// Carries trace/span IDs and optional baggage (key-value metadata).
+/// Active span context — threaded through the call graph.
+///
+/// `start_time` is `None` for remote-parent contexts (from `parse_traceparent`).
+/// `span_end` / `span_error` are no-ops on such contexts.
 pub type TraceContext = struct {
-    trace_id: TraceId,
-    span_id: SpanId,
-    parent_span_id: Option[SpanId],
-    baggage: Map[String, String],
+    trace_id:       String,
+    span_id:        String,
+    parent_span_id: Option[String],
+    baggage:        Map[String, String],
+    name:           String,
+    start_time:     Option[Instant],
+    attributes:     Map[String, String],
 }
 
-/// Span status: success or error.
+/// Span status discriminant.
 pub type SpanStatus = enum {
     Ok,
     Error { message: String },
 }
 
-/// A completed span with timing and attributes.
-pub type Span = struct {
-    name: String,
-    context: TraceContext,
-    start_time: Timestamp,
-    end_time: Option[Timestamp],
-    attributes: Map[String, String],
-    status: SpanStatus,
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+fn empty_string_map() -> Map[String, String] {
+    // {} is an empty block in MVL, not an empty map. Sentinel workaround.
+    let m: ref Map[String, String] = {"__trace_init__": ""};
+    m.remove("__trace_init__");
+    m
+}
+
+total fn opt_str(o: Option[String]) -> String {
+    match o {
+        None    => "-",
+        Some(s) => s,
+    }
+}
+
+total fn json_esc(s: String) -> String {
+    let s1: String = s.replace("\\", "\\\\");
+    let s2: String = s1.replace("\"", "\\\"");
+    let s3: String = s2.replace("\n", "\\n");
+    s3.replace("\r", "\\r")
+}
+
+/// Return true if every character in s is a lowercase ASCII hex digit (0-9, a-f).
+fn is_hex_string(s: String) -> Bool {
+    let chars: List[String] = s.chars();
+    let ok: ref Bool = true;
+    for c in chars {
+        if !"0123456789abcdef".contains(c) { ok = false } else {}
+    }
+    ok
+}
+
+
+fn format_attrs_logfmt(attrs: Map[String, String]) -> String {
+    let keys: List[String] = attrs.keys().sort();
+    let result: ref String = "";
+    for k in keys {
+        let v: String = match attrs.get(k) { Some(s) => s, None => "", };
+        result = result.concat(" ").concat(k).concat("=").concat(v)
+    }
+    result
+}
+
+fn format_attrs_json(attrs: Map[String, String]) -> String {
+    let keys: List[String] = attrs.keys().sort();
+    let result: ref String = "";
+    for k in keys {
+        let v: String = match attrs.get(k) { Some(s) => s, None => "", };
+        result = result.concat(",\"").concat(json_esc(k)).concat("\":\"").concat(json_esc(v)).concat("\"")
+    }
+    result
+}
+
+fn emit_logfmt(ctx: val TraceContext, ts: String, status: String, error_msg: String) -> String {
+    let parent: String   = opt_str(ctx.parent_span_id);
+    let attrs: String    = format_attrs_logfmt(ctx.attributes);
+    let err_part: String = if error_msg.len() > 0 { " error=".concat(error_msg) } else { "" };
+    let f1: String = "span span_id=".concat(ctx.span_id).concat(" trace_id=");
+    let f2: String = f1.concat(ctx.trace_id).concat(" parent=");
+    let f3: String = f2.concat(parent).concat(" name=");
+    let f4: String = f3.concat(ctx.name).concat(" end_time=");
+    let f5: String = f4.concat(ts).concat(" status=");
+    f5.concat(status).concat(err_part).concat(attrs)
+}
+
+fn emit_json(ctx: val TraceContext, ts: String, status: String, error_msg: String) -> String {
+    let parent: String = opt_str(ctx.parent_span_id);
+    let attrs: String  = format_attrs_json(ctx.attributes);
+    let j1: String = "{\"span_id\":\"".concat(json_esc(ctx.span_id)).concat("\",\"trace_id\":\"");
+    let j2: String = j1.concat(json_esc(ctx.trace_id)).concat("\",\"parent_span_id\":\"");
+    let j3: String = j2.concat(json_esc(parent)).concat("\",\"name\":\"");
+    let j4: String = j3.concat(json_esc(ctx.name)).concat("\",\"end_time\":\"");
+    let j5: String = j4.concat(ts).concat("\",\"status\":\"");
+    let j6: String = j5.concat(status).concat("\",\"error\":\"");
+    j6.concat(json_esc(error_msg)).concat("\"").concat(attrs).concat("}")
+}
+
+fn emit_span(tracer: val Tracer, ctx: val TraceContext, end_time: Instant, status: String, error_msg: String) -> Unit ! Console {
+    let ts: String   = format_instant(end_time, "%Y-%m-%dT%H:%M:%SZ");
+    let line: String = if format_is_json(tracer.format) {
+        emit_json(ctx, ts, status, error_msg)
+    } else {
+        emit_logfmt(ctx, ts, status, error_msg)
+    };
+    let _: Result[Unit, IoError] = write(tracer.fd, line.concat("\n"));
+}
+
+total fn format_is_json(f: SpanFormat) -> Bool {
+    match f {
+        SpanFormat::Json   => true,
+        SpanFormat::Logfmt => false,
+    }
 }
 
 // ── Trace lifecycle ───────────────────────────────────────────────────────────
 
-/// Start a new trace (entry point).
-/// Creates a new trace_id and root span_id.
-pub builtin fn trace_start(name: String) -> TraceContext ! Trace
+/// Start a new trace (entry point). Creates a root span with fresh trace_id and span_id.
+pub fn trace_start(name: String) -> TraceContext ! Trace {
+    TraceContext {
+        trace_id:       uuid_v4(),
+        span_id:        uuid_v4(),
+        parent_span_id: None,
+        baggage:        empty_string_map(),
+        name:           name,
+        start_time:     Some(now()),
+        attributes:     empty_string_map(),
+    }
+}
 
-/// Start a child span within an existing trace.
-/// Inherits trace_id and baggage; creates new span_id with parent link.
-pub builtin fn span_start(name: String, parent: TraceContext) -> TraceContext ! Trace
+/// Start a child span. Inherits trace_id and baggage; creates new span_id with parent link.
+pub fn span_start(name: String, parent: val TraceContext) -> TraceContext ! Trace {
+    TraceContext {
+        trace_id:       parent.trace_id,
+        span_id:        uuid_v4(),
+        parent_span_id: Some(parent.span_id),
+        baggage:        parent.baggage,
+        name:           name,
+        start_time:     Some(now()),
+        attributes:     empty_string_map(),
+    }
+}
 
-/// End a span successfully.
-pub builtin fn span_end(ctx: TraceContext) -> Unit ! Trace
+/// End a span successfully. Emits a span line to the tracer's fd.
+/// No-op for remote-parent contexts (start_time is None).
+pub fn span_end(val tracer: Tracer, val ctx: TraceContext) -> Unit ! Trace {
+    match ctx.start_time {
+        None    => {},
+        Some(_) => emit_span(tracer, ctx, now(), "ok", ""),
+    }
+}
 
-/// End a span with an error.
-pub builtin fn span_error(ctx: TraceContext, message: String) -> Unit ! Trace
+/// End a span with an error. Emits a span line to the tracer's fd.
+/// No-op for remote-parent contexts (start_time is None).
+pub fn span_error(val tracer: Tracer, val ctx: TraceContext, message: String) -> Unit ! Trace {
+    match ctx.start_time {
+        None    => {},
+        Some(_) => emit_span(tracer, ctx, now(), "error", message),
+    }
+}
 
 // ── Span attributes ───────────────────────────────────────────────────────────
 
-/// Add an attribute to the current span.
-/// Common attributes: http.method, http.path, db.statement, user.id
-pub builtin fn span_set(ctx: TraceContext, key: String, value: String) -> Unit ! Trace
-
-// ── Convenience wrapper ───────────────────────────────────────────────────────
-
-/// Trace a function call: creates a child span, runs the function, ends the span.
-/// On error, records the error message before propagating.
-pub builtin fn traced[T, E](
-    name: String,
-    parent: TraceContext,
-    f: fn(TraceContext) -> T ! E
-) -> T ! E + Trace
+/// Add an attribute to the span context. Returns updated context — pure, no effects.
+/// Returns TraceContext (not Unit) — functional update.
+/// Common keys: http.method, http.path, db.statement, user.id, error.message
+pub fn span_set(ctx: TraceContext, key: String, value: String) -> TraceContext {
+    let attrs: ref Map[String, String] = ctx.attributes;
+    attrs.insert(key, value);
+    TraceContext {
+        trace_id:       ctx.trace_id,
+        span_id:        ctx.span_id,
+        parent_span_id: ctx.parent_span_id,
+        baggage:        ctx.baggage,
+        name:           ctx.name,
+        start_time:     ctx.start_time,
+        attributes:     attrs,
+    }
+}
 
 // ── Baggage ───────────────────────────────────────────────────────────────────
 
 /// Set a baggage item (propagated to all child spans and downstream services).
 /// Use sparingly — baggage travels with every request.
 pub fn baggage_set(ctx: TraceContext, key: String, value: String) -> TraceContext {
+    let bag: ref Map[String, String] = ctx.baggage;
+    bag.insert(key, value);
     TraceContext {
-        trace_id: ctx.trace_id,
-        span_id: ctx.span_id,
+        trace_id:       ctx.trace_id,
+        span_id:        ctx.span_id,
         parent_span_id: ctx.parent_span_id,
-        baggage: ctx.baggage.insert(key, value),
+        baggage:        bag,
+        name:           ctx.name,
+        start_time:     ctx.start_time,
+        attributes:     ctx.attributes,
     }
 }
 
@@ -114,56 +266,41 @@ pub fn baggage_get(ctx: val TraceContext, key: String) -> Option[String] {
 
 /// Parse a W3C traceparent header into a remote-parent context.
 ///
-/// The returned context represents the REMOTE PARENT span — pass it to
-/// `span_start` to create a local child span; do NOT pass it to `span_end`.
-///
-/// Returns None if the header is missing, malformed, or an unsupported version.
-///
-/// # Flags
-/// The flags byte is parsed but not yet acted on (see #4).
-/// Sampling support requires #1.
+/// The returned context is the REMOTE PARENT — pass to `span_start`, not `span_end`.
+/// start_time is None: remote spans are not locally owned.
+/// Returns None if header is malformed or version is unsupported.
 pub fn parse_traceparent(header: String) -> Option[TraceContext] {
-    let parts = header.split("-");
+    let parts: List[String] = header.split("-");
     if parts.len() != 4 {
         return None
     }
-
-    let version   = parts[0];
-    let trace_id  = parts[1];
-    let parent_id = parts[2];   // W3C calls this "parent-id" — the remote span's id
-    // parts[3] is flags; sampling propagation tracked in #4
-
-    // Only version 00 is currently defined.
+    let version:   String = parts.get(0).unwrap_or("");
+    let trace_id:  String = parts.get(1).unwrap_or("");
+    let parent_id: String = parts.get(2).unwrap_or("");
     if version != "00" {
         return None
     }
-
-    // Validate lengths: trace_id=32 hex chars (128 bit), parent_id=16 hex chars (64 bit).
     if trace_id.len() != 32 || parent_id.len() != 16 {
         return None
     }
-
-    // Validate that both IDs are lowercase hex.
-    if !trace_id.chars().all(fn(c) -> Bool { c.is_ascii_hexdigit() }) {
+    if !is_hex_string(trace_id) {
         return None
     }
-    if !parent_id.chars().all(fn(c) -> Bool { c.is_ascii_hexdigit() }) {
+    if !is_hex_string(parent_id) {
         return None
     }
-
-    // parent_span_id is None: we don't know the remote span's own parent.
-    // The returned span_id IS the remote parent's id; span_start will use it
-    // to set parent_span_id on the new local span.
     Some(TraceContext {
-        trace_id: trace_id,
-        span_id: parent_id,
+        trace_id:       trace_id,
+        span_id:        parent_id,
         parent_span_id: None,
-        baggage: Map::new(),
+        baggage:        empty_string_map(),
+        name:           "",
+        start_time:     None,
+        attributes:     empty_string_map(),
     })
 }
 
-/// Format a TraceContext as a W3C traceparent header.
-/// Format: 00-{trace_id}-{span_id}-01
+/// Format a TraceContext as a W3C traceparent header: 00-{trace_id}-{span_id}-01
 pub fn format_traceparent(ctx: val TraceContext) -> String {
     "00-".concat(ctx.trace_id).concat("-").concat(ctx.span_id).concat("-01")
 }

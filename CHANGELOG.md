@@ -4,6 +4,26 @@ All notable changes to pkg-trace will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] - 2026-06-14
+
+### Changed
+- **BREAKING**: `span_end` and `span_error` now require a `Tracer` as the first argument (was using a global tracer)
+- **BREAKING**: `span_set` now returns `TraceContext` (pure function) instead of `Unit ! Trace` (was imperative)
+- Complete rewrite: Pure MVL implementation. All spans emitted as structured logs to a configurable `Fd` (default stderr)
+- `Trace` effect now subsumes `Clock + CryptoRandom + Console` (previously had no effect dependencies declared)
+
+### Removed
+- **BREAKING**: `pub builtin fn` declarations — pkg-trace is now pure MVL; no extern FFI calls
+- `traced[T, E]` wrapper (generic effects not supported in regular functions)
+
+### Added
+- `Tracer` struct for output configuration: format (Logfmt/Json) and fd (stderr, file, pipe)
+- `default_tracer()` and `file_tracer(fd, format)` constructors
+- `SpanFormat` enum: `Logfmt` and `Json` output formats
+- Pure MVL span emission: logfmt and JSON-compatible output
+- W3C Trace Context (traceparent header) parsing and formatting
+- Baggage support for context propagation across service boundaries
+
 ## [0.2.1] - 2026-06-14
 
 ### Fixed
