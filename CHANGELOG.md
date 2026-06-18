@@ -4,6 +4,27 @@ All notable changes to pkg-trace will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.0] - 2026-06-18
+
+### Added
+- `Makefile` with `check`, `test`, `coverage`, `prove`, `assurance`, `version`, and `clean` targets — mirrors the pkg-http developer workflow
+- `.openspec/adr/0001-span-baggage-effect-trace-model.md` — documents the span/baggage model, Effect Trace hierarchy, and remote-parent semantics
+- `.openspec/adr/0002-explicit-total-fn-annotation.md` — totality policy: zero implicit `total*` functions permitted
+
+### Changed
+- **`is_hex_string`** — promoted from bare `fn` to `total fn` (bounded for-loop over `chars()`, no effects)
+- **`empty_string_map`** — promoted from bare `fn` to `total fn` (bounded ref mutation, purely local)
+- **`format_attrs_logfmt`** — promoted from bare `fn` to `total fn` (bounded for-loop, string ops only)
+- **`format_attrs_json`** — promoted from bare `fn` to `total fn` (bounded for-loop, calls only `total fn`)
+- **`emit_logfmt`** — promoted from bare `fn` to `total fn` (pure string construction, no effects)
+- **`emit_json`** — promoted from bare `fn` to `total fn` (pure string construction, no effects)
+- **`span_set`** — promoted from bare `pub fn` to `pub total fn` (functional update, no effects)
+- **`baggage_set`** — promoted from bare `pub fn` to `pub total fn` (functional update, no effects)
+- **`baggage_get`** — promoted from bare `pub fn` to `pub total fn` (pure field accessor)
+- **`format_traceparent`** — promoted from bare `pub fn` to `pub total fn` (pure string construction)
+- **`default_tracer`** — promoted from bare `pub fn` to `pub total fn` (pure constructor)
+- **`file_tracer`** — promoted from bare `pub fn` to `pub total fn` (pure constructor)
+
 ## [0.3.3] - 2026-06-14
 
 ### Fixed
