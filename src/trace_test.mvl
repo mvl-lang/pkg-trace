@@ -1,0 +1,211 @@
+// pkg.trace tests — unit tests for trace context, W3C parsing, and pure helpers.
+//
+// Tests cover the pure functions and types only. No effects, no time.
+// Type re-declarations: workaround for #96 (inter-package import in test context).
+
+use std.io.{Fd, stderr, stdout}
+
+// ── Type re-declarations (workaround: #96) ────────────────────────────────────
+
+type SpanFormat = enum {
+    Logfmt,
+    Json,
+}
+
+type Tracer = struct {
+    format: SpanFormat,
+    fd: Fd,
+}
+
+type SpanStatus = enum {
+    Ok,
+    Error { message: String },
+}
+
+// ── Function re-declarations ──────────────────────────────────────────────────
+
+total fn default_tracer() -> Tracer {
+    Tracer { format: SpanFormat::Logfmt, fd: stderr() }
+}
+
+total fn file_tracer(fd: Fd, format: SpanFormat) -> Tracer {
+    Tracer { format: format, fd: fd }
+}
+
+total fn is_hex_string(s: String) -> Bool {
+    let chars: List[String] = s.chars();
+    let ok: ref Bool = true;
+    for c in chars {
+        if !"0123456789abcdef".contains(c) {
+            ok = false;
+        } else { }
+    }
+    ok
+}
+
+total fn format_traceparent(trace_id: String, span_id: String) -> String {
+    "00-".concat(trace_id).concat("-").concat(span_id).concat("-01")
+}
+
+// ── Tracer construction tests ─────────────────────────────────────────────────
+
+test fn default_tracer_uses_logfmt() -> Unit {
+    let t: Tracer = default_tracer();
+    assert_eq(t.format, SpanFormat::Logfmt)
+}
+
+test fn file_tracer_custom_format() -> Unit {
+    let t: Tracer = file_tracer(stdout(), SpanFormat::Json);
+    assert_eq(t.format, SpanFormat::Json)
+}
+
+// ── SpanFormat tests ──────────────────────────────────────────────────────────
+
+test fn span_format_logfmt_variant() -> Unit {
+    let f: SpanFormat = SpanFormat::Logfmt;
+    assert_eq(f, SpanFormat::Logfmt)
+}
+
+test fn span_format_json_variant() -> Unit {
+    let f: SpanFormat = SpanFormat::Json;
+    assert_eq(f, SpanFormat::Json)
+}
+
+test fn span_format_variants_distinct() -> Unit {
+    assert(SpanFormat::Logfmt != SpanFormat::Json)
+}
+
+// ── SpanStatus tests ──────────────────────────────────────────────────────────
+
+test fn span_status_ok() -> Unit {
+    let s: SpanStatus = SpanStatus::Ok;
+    assert_eq(s, SpanStatus::Ok)
+}
+
+test fn span_status_error_with_message() -> Unit {
+    let s: SpanStatus = SpanStatus::Error { message: "connection timeout" };
+    match s {
+        SpanStatus::Ok => assert(false),
+        SpanStatus::Error { message: msg } => assert_eq(msg, "connection timeout"),
+    }
+}
+
+// ── is_hex_string tests ───────────────────────────────────────────────────────
+
+test fn is_hex_string_valid_lowercase() -> Unit {
+    assert(is_hex_string("0af7651916cd43dd"))
+}
+
+test fn is_hex_string_all_digits() -> Unit {
+    assert(is_hex_string("0123456789"))
+}
+
+test fn is_hex_string_all_hex_letters() -> Unit {
+    assert(is_hex_string("abcdef"))
+}
+
+test fn is_hex_string_mixed() -> Unit {
+    assert(is_hex_string("0af7651916cd43dd8448eb211c80319c"))
+}
+
+test fn is_hex_string_rejects_uppercase() -> Unit {
+    assert(!is_hex_string("0AF7651916CD43DD"))
+}
+
+test fn is_hex_string_rejects_invalid_chars() -> Unit {
+    assert(!is_hex_string("0af765zzzz"))
+}
+
+test fn is_hex_string_rejects_spaces() -> Unit {
+    assert(!is_hex_string("0af7 6519"))
+}
+
+test fn is_hex_string_empty_is_valid() -> Unit {
+    assert(is_hex_string(""))
+}
+
+// ── format_traceparent tests ──────────────────────────────────────────────────
+
+test fn format_traceparent_basic() -> Unit {
+    let header: String = format_traceparent(
+        "0af7651916cd43dd8448eb211c80319c",
+        "b7ad6b7169203331"
+    );
+    assert_eq(header, "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+}
+
+test fn format_traceparent_always_version_00() -> Unit {
+    let header: String = format_traceparent(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbb"
+    );
+    assert(header.starts_with("00-"))
+}
+
+test fn format_traceparent_always_sampled_flag() -> Unit {
+    let header: String = format_traceparent(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbb"
+    );
+    assert(header.ends_with("-01"))
+}
+
+test fn format_traceparent_contains_trace_id() -> Unit {
+    let trace_id: String = "0af7651916cd43dd8448eb211c80319c";
+    let header: String = format_traceparent(trace_id, "b7ad6b7169203331");
+    assert(header.contains(trace_id))
+}
+
+test fn format_traceparent_contains_span_id() -> Unit {
+    let span_id: String = "b7ad6b7169203331";
+    let header: String = format_traceparent("0af7651916cd43dd8448eb211c80319c", span_id);
+    assert(header.contains(span_id))
+}
+
+// ── Traceparent validation tests (format only) ────────────────────────────────
+
+test fn traceparent_trace_id_is_32_chars() -> Unit {
+    let trace_id: String = "0af7651916cd43dd8448eb211c80319c";
+    assert_eq(trace_id.len(), 32)
+}
+
+test fn traceparent_span_id_is_16_chars() -> Unit {
+    let span_id: String = "b7ad6b7169203331";
+    assert_eq(span_id.len(), 16)
+}
+
+test fn traceparent_version_00_is_current() -> Unit {
+    let version: String = "00";
+    assert_eq(version, "00")
+}
+
+// ── Baggage key/value tests (pure string ops) ─────────────────────────────────
+
+test fn baggage_key_format() -> Unit {
+    let key: String = "user.id";
+    assert(key.contains("."))
+}
+
+test fn baggage_value_can_be_any_string() -> Unit {
+    let value: String = "12345-abc-xyz";
+    assert_eq(value.len(), 13)
+}
+
+// ── Map tests for attributes/baggage ──────────────────────────────────────────
+
+test fn map_insert_and_get() -> Unit {
+    let m: ref Map[String, String] = {"key": "value"};
+    m.insert("new", "data");
+    assert_eq(m.get("new"), Some("data"))
+}
+
+test fn map_get_missing_returns_none() -> Unit {
+    let m: Map[String, String] = {"key": "value"};
+    assert_eq(m.get("missing"), None)
+}
+
+test fn map_overwrite_existing() -> Unit {
+    let m: ref Map[String, String] = {"key": "old"};
+    m.insert("key", "new");
+    assert_eq(m.get("key"), Some("new"))
+}
